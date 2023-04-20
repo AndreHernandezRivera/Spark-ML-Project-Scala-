@@ -1,0 +1,312 @@
+
+import org.apache.spark.sql.SparkSession
+val readText=sc.textFile("assignment/Project 1_dataset_bank-full (2).csv")
+val rdd1 = readText.map{x => x.replaceAll("\"", "")}
+
+import spark.implicits._
+val arrays = rdd1.map(_.split("\\;")) 
+val maxCols = arrays.map(_.length).max()
+val result = arrays.toDF("arr").select((0 until maxCols).map(i => $"arr"(i).as(s"col_$i")): _*)
+result.show()
+
+val old_columns = Seq("col_0", "col_1", "col_2", "col_3", "col_4", "col_5", "col_6", "col_7", "col_8", "col_9", "col_10", "col_11", "col_12", "col_13", "col_14", "col_15", "col_16")
+val new_columns = Seq("age","job","marital","education","default","balance","housing","loan","contact","day","month","duration","campaign","pdays","previous","poutcome","y")
+val columnsList = old_columns.zip(new_columns).map(f=>{col(f._1).as(f._2)})
+val df1 = result.select(columnsList:_*)
+df1.printSchema()
+
+df1.createOrReplaceTempView("tableName")
+
+val df= spark.sql("SELECT * FROM tableName WHERE age NOT LIKE 'age'")
+df.createOrReplaceTempView("tableName")
+df.show()
+
+val df5=df.select(df.col("age").cast("double"),df.col("job"),df.col("marital"),df.col("education"),df.col("default"),df.col("balance").cast("double"),df.col("housing"), df.col("loan"),df.col("contact"),df.col("day").cast("double"),df.col("month"),df.col("duration").cast("double"),df.col("campaign").cast("double"),df.col("pdays").cast("double"),df.col("previous").cast("double"),df.col("poutcome"),df.col("y"))
+
+df5.createOrReplaceTempView("tableName")
+df5.show()
+df5.printSchema()
+
+import org.apache.spark.ml.classification.LogisticRegression
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.feature.{OneHotEncoderEstimator, StringIndexer,VectorAssembler,VectorIndexer}
+import org.apache.spark.ml.feature.OneHotEncoder
+import org.apache.spark.ml.linalg.Vectors
+import org.apache.spark.ml.evaluation.BinaryClassificationEvaluator
+
+//////////////////////////////////////////////////////////////
+
+import org.apache.spark.ml.feature.StringIndexer
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+
+val features = q6.columns.filterNot(_.contains("y"))
+val encodedFeatures=features.flatMap{name=>
+	val indexer = new StringIndexer()
+		.setInputCol(name)
+		.setOutputCol(name + "_Index")
+	
+	Array(indexer)
+}.toArray
+
+val pipeline = new Pipeline.setStages(encodedFeatures)
+val indexer_model=pipeline.fit(q6)
+val df_transformed=indexer_model.transform(q6)
+
+display_df_transformed
+
+
+////////////////////////////http://apache-spark-user-list.1001560.n3.nabble.com/StringIndexer-on-several-columns-in-a-DataFrame-with-Scala-td29842.html
+
+val featureCol = df5.columns
+val indexers = featureCol.map { colName =>
+  new StringIndexer().setInputCol(colName).setOutputCol(colName + "_indexed")}
+
+for (colName <- featureCol) {
+  val index = new StringIndexer()
+	.setInputCol(colName)
+	.setOutputCol(colName + "_indexed")
+  indexers = indexers :+ index
+}
+
+val pipeline = new Pipeline().setStages(indexers)      
+val newDF = pipeline.fit(df5).transform(df5)
+newDF.show()
+
+
+//
+//
+// q2 (the 1st question 2)
+//
+//
+newDF.createOrReplaceTempView("stats")
+val basics=spark.sql("select (select count(y_indexed) from stats where y_indexed=1)/(select count(y_indexed) from stats where y_indexed=0) as success_rate_of_campaign from stats limit 1").show
+ 
+//
+//
+// q1 
+//
+//
+
+val basicStats=spark.sql("SELECT max(age) as max_age,avg(age) as average_age,(select percentile_approx(age,0.5) from stats) as median from stats").show
+
+//
+//
+// q2 Check the quality of customers by checking average balance, median balance of customers
+//
+//
+
+val balanceStats=spark.sql("SELECT avg(balance) as average_balance_of_customers,(select percentile_approx(balance,0.5) from stats) as median_balance_of_customers from stats").show
+
+
+
+//
+//
+// q3
+//
+//
+
+val q3=newDF.select("age","y_indexed")
+
+val indexLabel= new StringIndexer().setInputCol("y_indexed").setOutputCol("label")
+val q3df=indexLabel.fit(q3).transform(q3)
+
+
+val logregdataUndropped=(q3df.select(q3df("label").as("label"),$"age"))
+val logregdata=logregdataUndropped.na.drop()
+
+logregdata.createOrReplaceTempView("data")
+val split=spark.sql("(select * from data where label=1.0 order by rand() limit 5000) union all (select * from data where label=0.0 order by rand() limit 5000)")
+
+
+val yIndexer = new StringIndexer().setInputCol("y_indexed").setOutputCol("yIndex")
+val ageIndexer = new StringIndexer().setInputCol("age").setOutputCol("ageIndex")
+
+val yEncoder = new OneHotEncoder().setInputCol("yIndex").setOutputCol("yVec")
+val ageEncoder = new OneHotEncoder().setInputCol("ageIndex").setOutputCol("ageVec")
+
+//label feature pairing time, where you put ALL the variables inside the array, and replace string vars with the encoded equivelents
+val assembler = (new VectorAssembler().setInputCols(Array("ageVec")).setOutputCol("features"))
+
+val Array(training,test) = split.randomSplit(Array(0.7,0.3))
+
+import org.apache.spark.ml.Pipeline
+val lr = new LogisticRegression()
+val pipeline = new Pipeline().setStages(Array(ageIndexer,ageEncoder,assembler,lr))
+val model =pipeline.fit(training)
+
+val results= model.transform(test)
+
+
+//import org.apache.spark.mllib.evaluation.MulticlassMetrics
+//val predictionAndLabels = results.select($"prediction",$"label").as[(Double,Double)].rdd
+//val metrics = new MulticlassMetrics(predictionAndLabels)
+//val q3answer=metrics.accuracy
+//printf("Age is a strong predictor for subscriptions, based on lr model accuracy: %s", q3answer)
+
+results.createOrReplaceTempView("testTrans")
+//val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label").show
+val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label")
+query.createOrReplaceTempView("sumPos")
+val q=spark.sql("select sum(number) as sumFpositiveAndTpositives from sumPos where label like '1.0' ")
+q.createOrReplaceTempView("Precision")
+val accuracy=spark.sql("select (select number from sumPos where prediction like '1.0' and label like '1.0')/sumFpositiveAndTpositives as Accuracy from Precision")
+accuracy.show
+
+
+//
+//
+// q4
+//
+//
+
+val q4=newDF.select("marital_indexed","y_indexed")
+
+val indexLabel= new StringIndexer().setInputCol("y_indexed").setOutputCol("label")
+val q4df=indexLabel.fit(q4).transform(q4)
+
+
+val logregdataUndropped=(q4df.select(q4df("label").as("label"),$"marital_indexed"))
+val logregdata=logregdataUndropped.na.drop()
+
+logregdata.createOrReplaceTempView("data")
+val split=spark.sql("(select * from data where label=1.0 order by rand() limit 5000) union all (select * from data where label=0.0 order by rand() limit 5000)")
+
+
+val labelIndexer = new StringIndexer().setInputCol("label").setOutputCol("labelIndex")
+val maritalIndexer = new StringIndexer().setInputCol("marital_indexed").setOutputCol("maritalIndex")
+
+val labelEncoder = new OneHotEncoder().setInputCol("labelIndex").setOutputCol("labelVec")
+val maritalEncoder = new OneHotEncoder().setInputCol("maritalIndex").setOutputCol("maritalVec")
+
+//label feature pairing time, where you put ALL the variables inside the array, and replace string vars with the encoded equivelents
+val assembler = (new VectorAssembler().setInputCols(Array("maritalVec")).setOutputCol("features"))
+
+val Array(training,test) = split.randomSplit(Array(0.7,0.3))
+
+import org.apache.spark.ml.Pipeline
+val lr = new LogisticRegression()
+val pipeline = new Pipeline().setStages(Array(maritalIndexer,maritalEncoder,assembler,lr))
+val model2 =pipeline.fit(training)
+
+val results= model2.transform(test)
+
+results.createOrReplaceTempView("testTrans")
+//val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label").show
+val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label")
+query.createOrReplaceTempView("sumPos")
+val q=spark.sql("select sum(number) as sumFpositiveAndTpositives from sumPos where label like '1.0' ")
+q.createOrReplaceTempView("Precision")
+val accuracy=spark.sql("select (select number from sumPos where prediction like '1.0' and label like '1.0')/sumFpositiveAndTpositives as Accuracy from Precision")
+accuracy.show
+
+
+//
+//
+// q5
+//
+//
+
+val q5=newDF.select("age_indexed","marital_indexed","y_indexed")
+
+val indexLabel= new StringIndexer().setInputCol("y_indexed").setOutputCol("label")
+val q5df=indexLabel.fit(q5).transform(q5)
+
+
+val logregdataUndropped=(q5df.select(q5df("label").as("label"),$"age_indexed",$"marital_indexed"))
+val logregdata=logregdataUndropped.na.drop()
+
+logregdata.createOrReplaceTempView("data")
+val split=spark.sql("(select * from data where label=1.0 order by rand() limit 5000) union all (select * from data where label=0.0 order by rand() limit 5000)")
+
+
+val labelIndexer = new StringIndexer().setInputCol("label").setOutputCol("labelIndex")
+val ageIndexer = new StringIndexer().setInputCol("age_indexed").setOutputCol("ageIndex")
+val maritalIndexer = new StringIndexer().setInputCol("marital_indexed").setOutputCol("maritalIndex")
+
+val labelEncoder = new OneHotEncoder().setInputCol("labelIndex").setOutputCol("labelVec")
+val ageEncoder = new OneHotEncoder().setInputCol("ageIndex").setOutputCol("ageVec")
+val maritalEncoder = new OneHotEncoder().setInputCol("maritalIndex").setOutputCol("maritalVec")
+
+//label feature pairing time, where you put ALL the variables inside the array, and replace string vars with the encoded equivelents
+val assembler = (new VectorAssembler().setInputCols(Array("ageVec","maritalVec")).setOutputCol("features"))
+
+val Array(training,test) = split.randomSplit(Array(0.7,0.3))
+
+import org.apache.spark.ml.Pipeline
+val lr = new LogisticRegression()
+val pipeline = new Pipeline().setStages(Array(ageIndexer,maritalIndexer,ageEncoder,maritalEncoder,assembler,lr))
+val model3 =pipeline.fit(training)
+
+val results= model3.transform(test)
+
+results.createOrReplaceTempView("testTrans")
+//val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label").show
+val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label")
+query.createOrReplaceTempView("sumPos")
+val q=spark.sql("select sum(number) as sumFpositiveAndTpositives from sumPos where label like '1.0' ")
+q.createOrReplaceTempView("Precision")
+val accuracy=spark.sql("select (select number from sumPos where prediction like '1.0' and label like '1.0')/sumFpositiveAndTpositives as Accuracy from Precision")
+accuracy.show
+
+//
+//
+// q6
+//
+//
+
+val q6=newDF.select("age_indexed","marital_indexed","education_indexed","default_indexed","housing_indexed","loan_indexed","contact_indexed","month_indexed","y_indexed")
+
+val indexLabel= new StringIndexer().setInputCol("y_indexed").setOutputCol("label")
+val q6df=indexLabel.fit(q6).transform(q6)
+
+
+val logregdataUndropped=(q6df.select(q6df("label").as("label"),$"age_indexed",$"marital_indexed",$"education_indexed",$"default_indexed",$"housing_indexed",$"loan_indexed",$"contact_indexed",$"month_indexed"))
+
+val logregdata=logregdataUndropped.na.drop()
+
+logregdata.createOrReplaceTempView("data")
+val split=spark.sql("(select * from data where label=1.0 order by rand() limit 5000) union all (select * from data where label=0.0 order by rand() limit 5000)")
+
+
+val labelIndexer = new StringIndexer().setInputCol("label").setOutputCol("labelIndex")
+val ageIndexer = new StringIndexer().setInputCol("age_indexed").setOutputCol("ageIndex")
+val maritalIndexer = new StringIndexer().setInputCol("marital_indexed").setOutputCol("maritalIndex")
+val educationIndexer = new StringIndexer().setInputCol("education_indexed").setOutputCol("educationIndex")
+val defaultIndexer = new StringIndexer().setInputCol("default_indexed").setOutputCol("defaultIndex")
+val housingIndexer = new StringIndexer().setInputCol("housing_indexed").setOutputCol("housingIndex")
+val loanIndexer = new StringIndexer().setInputCol("loan_indexed").setOutputCol("loanIndex")
+val contactIndexer = new StringIndexer().setInputCol("contact_indexed").setOutputCol("contactIndex")
+val monthIndexer = new StringIndexer().setInputCol("month_indexed").setOutputCol("monthIndex")
+
+val labelEncoder = new OneHotEncoder().setInputCol("labelIndex").setOutputCol("labelVec")
+val ageEncoder = new OneHotEncoder().setInputCol("ageIndex").setOutputCol("ageVec")
+val maritalEncoder = new OneHotEncoder().setInputCol("maritalIndex").setOutputCol("maritalVec")
+val educationEncoder = new OneHotEncoder().setInputCol("educationIndex").setOutputCol("educationVec")
+val defaultEncoder = new OneHotEncoder().setInputCol("defaultIndex").setOutputCol("defaultVec")
+val housingEncoder = new OneHotEncoder().setInputCol("housingIndex").setOutputCol("housingVec")
+val loanEncoder = new OneHotEncoder().setInputCol("loanIndex").setOutputCol("loanVec")
+val contactEncoder = new OneHotEncoder().setInputCol("contactIndex").setOutputCol("contactVec")
+val monthEncoder = new OneHotEncoder().setInputCol("monthIndex").setOutputCol("monthVec")
+
+//label feature pairing time, where you put ALL the variables inside the array, and replace string vars with the encoded equivelents
+val assembler = (new VectorAssembler().setInputCols(Array("ageVec","maritalVec","educationVec","defaultVec","housingVec","loanVec","contactVec","monthVec")).setOutputCol("features"))
+
+
+val Array(training,test) = split.randomSplit(Array(0.7,0.3))
+
+import org.apache.spark.ml.Pipeline
+val lr = new LogisticRegression()
+val pipeline = new Pipeline().setStages(Array(ageIndexer,maritalIndexer,educationIndexer,defaultIndexer,housingIndexer,loanIndexer,contactIndexer,monthIndexer,ageEncoder,maritalEncoder,educationEncoder,defaultEncoder,housingEncoder,loanEncoder,contactEncoder,monthEncoder,assembler,lr))
+val model4 =pipeline.fit(training)
+
+val results= model4.transform(test)
+
+results.createOrReplaceTempView("testTrans")
+//val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label").show
+val query= spark.sql("select prediction,label,count(*) as number from testTrans group by prediction,label")
+query.createOrReplaceTempView("sumPos")
+val q=spark.sql("select sum(number) as sumFpositiveAndTpositives from sumPos where label like '1.0' ")
+q.createOrReplaceTempView("Precision")
+val accuracy=spark.sql("select (select number from sumPos where prediction like '1.0' and label like '1.0')/sumFpositiveAndTpositives as Accuracy from Precision")
+accuracy.show
+
